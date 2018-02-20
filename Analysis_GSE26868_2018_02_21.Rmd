@@ -1,0 +1,232 @@
+---
+title: "Analysis of GSE26868 data"
+author: "Axel Nohturfft"
+date: "`r Sys.Date()`"
+output:
+  html_notebook:
+    code_folding: hide
+    fig_caption: yes
+    highlight: tango
+    number_sections: no
+    theme: sandstone
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+  html_document:
+    toc: yes
+    toc_depth: '3'
+---
+
+<style>
+h2 {background: brown;color: white;padding-left: 7px;}
+h3 {color: brown;}
+</style>
+
+## SETUP  
+### Clear memory and console  
+```{r}
+# Clear memory
+rm(list=setdiff(ls(all=TRUE), c("lib.loc", "proj.root", ".Random.seed")))
+# Clear console - equivalent to pressing Ctrl-L
+cat("\014") 
+# Set parameter for how R handles strings (strings = text in programming parlance)
+options(stringsAsFactors = FALSE)
+```
+
+### Confirm working directory  
+```{r}
+getwd() # "Get working directory"
+```
+
+### Load packages  
+* The magrittr package provides Unix-style pipes `("%>%")` that pass the results of one command to next.
+```{r}
+# install.packages("magrittr", lib=lib.loc)
+# install.packages("rmarkdown", lib=lib.loc)
+library(magrittr, lib.loc=lib.loc)
+```
+
+
+### Load data file  
+Define data filename and check that it exists:  
+```{r}
+data.file <- "GSE26868_geo2r_results.txt"
+file.exists(data.file)
+```
+
+Now load the file into R:  
+```{r}
+df <- read.table(file=data.file, header=T, sep="\t")
+# The 'head' command prints the first 6 rows of a data frame (or first 6 items of a vector).
+# The 'tail' command ...
+head(df)
+```
+
+### Have a look at the data frame  
+Print number of rows and columns:  
+```{r}
+dim(df)
+```
+
+Print number of rows:  
+```{r}
+nrow(df)
+```
+
+Print number of columns:  
+```{r}
+ncol(df)
+```
+
+Print column headers:  
+```{r}
+names(df)
+```
+
+__What do the headers mean?__  
+
+* __"ID"__: Platform (i.e. Affymetrix) specific probe identifier  
+* __"P.Value"__: Probability that null hypothesis is true (null hypothesis = no difference in expression between the two conditions that were analyzed)  
+* __"adj.P.Val"__: adjusted P.Value, i.e. corrected for multiple hypothesis testing. *"The meaning of the adjusted p-value is as follows. If you select all genes with p-value below a given value, say 0.05, as differentially expression, then the expected proportion of false discoveries in the selected group should be less than that value, in this case less than 5%."* [(Source)](https://support.bioconductor.org/p/6124/)  
+* __"logFC"__: log (basis 2) fold change  
+* __"t"__: fold change divided by standard error [(detailed info)](https://support.bioconductor.org/p/6124/)
+* __"B"__: [(detailed info)](https://support.bioconductor.org/p/6124/)
+
+If a code chunk produces more than one output, they will be available as tabs in the script document:  
+```{r}
+head(df, 3)
+tail(df, 3)
+```
+
+How many different Affy probes are represented in our data frame?  
+```{r}
+# print(length(unique(df$ID)))
+
+df$ID %>% as.character %>% unique %>% length
+```
+How many different gene symbols?  
+```{r}
+df$Gene.symbol %>% as.character %>% unique %>% length
+```
+
+## CLEAN UP DATA  
+### Clean-up (i): Keep only relevant columns of the data frame:  
+```{r}
+df <- df[,c("ID", "Gene.symbol", "adj.P.Val", "logFC", "Gene.title")]
+head(df,2)
+```
+
+### Clean-up (ii): Remove rows without gene symbol:  
+```{r}
+df2 <- subset(df, Gene.symbol != "") %>% set_rownames(NULL)
+nrow(df2)
+```
+
+Number of rows removed: `r nrow(df) - nrow(df2)`.  
+
+### Clean-up (iii): Remove rows with ambiguous gene assignments:  
+Gene symbols separated by three forward slashes (///) indicate ambiguous gene assignments.  
+```{r}
+df2[72,]
+```
+
+We'll use the `grep` function to search for items in the 'Gene.symbol' column that contain this text. The first argument to `grep` is the text we are looking for (///), the second item is a character vector in which to search (the 'Gene.symbol' column in our data frame). `grep` returns a vector of numbers - these numbers represent the position (index) of where in the vector the search text was found. Type '?grep' at the command prompt or use the RStudio help tab to learn more about `grep` and related functions.  
+
+```{r}
+index.slashes <- grep("///", df2$Gene.symbol)
+# What does the index.slashes vector look like?
+head(index.slashes) # 72 141 176 212 227 312
+# How many gene symbols entries are affected?
+number.of.bad.symbols <- length(index.slashes) # 933
+cat(paste("Number of 'bad' symbols:", number.of.bad.symbols))
+```
+
+We can then use this index to subset our data frame and remove the 'bad' rows. (Note the use of the minus sign):
+```{r}
+df3 <- df2[-index.slashes,]
+nrow(df3)
+```
+
+##  QUALITY CONTROL: FILTERING DATA  
+To identify the most relevant genes in our dataset, we will filter the data based on (i) a maximum adjusted p value and (ii) a minimum log~2~(fold change).
+
+### Filtering by adjusted p value:  
+The R `subset` function is very useful for filtering data frames. The code below can be translated as: "Return those rows in df3 where the adjusted p.value is 0.05 or less."  
+```{r}
+df4 <- subset(df3, adj.P.Val <= 0.05)
+nrow(df4)
+```
+(Number of rows removed: `r nrow(df3) - nrow(df4)`)  
+
+### Filtering by log~2~(fold change):  
+The `abs()` function returns the "absolute" (i.e.) positive form of a number. E.g. abs(-1) would be 1.  
+```{r}
+df5 <- subset(df4, abs(logFC) >= 1)
+nrow(df5)
+```
+(Number of rows removed: `r nrow(df4) - nrow(df5)`)  
+
+## SELECT UP AND DOWNREGULATED GENES
+We can now extract the up and down-regulated genes and save them for further analysis:  
+### Up-regulated genes:  
+```{r}
+df.up <- subset(df5, logFC > 0)
+# Sort decreasing by fold change:
+df.up <- df.up[order(df.up$logFC, decreasing=TRUE),]
+nrow(df.up)
+```
+
+```{r}
+head(df.up, 4)
+```
+
+
+### Down-regulated genes:  
+```{r}
+df.down <- subset(df5, logFC < 0)
+df.down <- df.down[order(df.down$logFC, decreasing=FALSE),]
+nrow(df.down)
+```
+
+```{r}
+head(df.down, 4)
+```
+
+
+### Save gene symbols:  
+#### Up regulated genes:  
+```{r}
+up <- df.up$Gene.symbol %>% unique %>% sort
+up
+```
+
+Save in file using `cat()` function:  
+```{r}
+out.file.up <- "GSE26868_up.txt"
+cat(up, file=out.file.up, sep="\n")
+```
+
+#### Down regulated genes: 
+```{r}
+down <- df.down$Gene.symbol %>% unique %>% sort
+down
+```
+
+Save in file using `cat()` function:  
+```{r}
+out.file.down <- "GSE26868_down.txt"
+cat(down, file=out.file.down, sep="\n")
+```
+
+Check whether files have been saved:  
+```{r}
+cat(list.files(), sep="\n")
+```
+
+## NEXT ...  
+The genes could now be analyzed e.g. for 'gene set enrichment' to see if many of them fall into a known category.  
+Such analyses can be done directly in R, or more conveniently by uploading the gene symbols to websites such as:
+
+* [GOrilla](http://cbl-gorilla.cs.technion.ac.il/): looks for enrichment with 'gene ontology' (GO) categories.
+* [enrichr](http://amp.pharm.mssm.edu/Enrichr/) and  
+* [GSEA](http://software.broadinstitute.org/gsea/index.jsp) ('gene set enrichment analysis') allow to search for overlap among a larger set of gene categories.
